@@ -1,0 +1,18 @@
+/target
+/.claude/
+.idea/
+
+# Build artifacts
+**/target/
+**/pkg/
+**/dist/
+
+# Secrets — keep .env.example tracked, never the real .env
+.env
+.env.local
+.env.*.local
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp

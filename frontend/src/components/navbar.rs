@@ -1,11 +1,11 @@
+use crate::api;
 use leptos::*;
 use leptos_router::*;
-use crate::api;
 
 #[component]
 pub fn Navbar() -> impl IntoView {
     let (is_logged_in, set_is_logged_in) = create_signal(api::get_token().is_some());
-    
+
     let logout = move |_| {
         api::clear_token();
         set_is_logged_in.set(false);

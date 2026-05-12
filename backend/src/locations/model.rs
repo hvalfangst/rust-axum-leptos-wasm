@@ -1,5 +1,6 @@
 use diesel::prelude::*;
-use serde_derive::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+
 use crate::schema::locations;
 
 #[derive(Serialize, Debug, Clone, Queryable)]

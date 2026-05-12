@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "std::env::var", reason = "use the centralized Config loaded at startup" },
+]

@@ -1,5 +1,6 @@
 use diesel::prelude::*;
-use serde_derive::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+
 use crate::schema::empires;
 
 #[derive(Serialize, Debug, Clone, Queryable)]
@@ -9,7 +10,7 @@ pub struct Empire {
     pub name: String,
     pub slogan: String,
     pub location_id: i32,
-    pub description: String
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Insertable, Deserialize, Serialize)]
@@ -18,5 +19,5 @@ pub struct UpsertEmpire {
     pub name: String,
     pub slogan: String,
     pub location_id: i32,
-    pub description: String
+    pub description: String,
 }

@@ -1,9 +1,12 @@
+use crate::api;
+use crate::api::{
+    is_authenticated, Empire as ApiEmpire, Location as ApiLocation, UpsertEmpire, UpsertLocation, UpsertUser,
+    User as ApiUser,
+};
+use crate::components::forms::*;
+use crate::components::navbar::Navbar;
 use leptos::*;
 use leptos_router::*;
-use crate::api;
-use crate::api::{Location as ApiLocation, Empire as ApiEmpire, User as ApiUser, UpsertLocation, UpsertEmpire, UpsertUser, is_authenticated};
-use crate::components::navbar::Navbar;
-use crate::components::forms::*;
 
 #[component]
 pub fn HomePage() -> impl IntoView {
@@ -12,7 +15,7 @@ pub fn HomePage() -> impl IntoView {
         <div class="container">
             <h1>"Welcome to the API Frontend"</h1>
             <p>"This is a Leptos frontend for the Axum API with authentication."</p>
-            
+
             {move || if api::get_token().is_some() {
                 view! {
                     <div class="dashboard">
@@ -113,7 +116,7 @@ pub fn LocationsPage() -> impl IntoView {
                         }
                         set_show_form.set(false);
                         set_editing_location.set(None);
-                    },
+                    }
                     Err(e) => set_error.set(Some(e)),
                 }
                 set_loading.set(false);
@@ -145,11 +148,9 @@ pub fn LocationsPage() -> impl IntoView {
         spawn_local(async move {
             set_loading.set(true);
             match api::delete_location(id).await {
-                Ok(_) => {
-                    match api::get_locations().await {
-                        Ok(locs) => set_locations.set(locs),
-                        Err(e) => set_error.set(Some(e)),
-                    }
+                Ok(_) => match api::get_locations().await {
+                    Ok(locs) => set_locations.set(locs),
+                    Err(e) => set_error.set(Some(e)),
                 },
                 Err(e) => set_error.set(Some(e)),
             }
@@ -161,7 +162,7 @@ pub fn LocationsPage() -> impl IntoView {
         <Navbar/>
         <div class="container">
             <h1>"Locations"</h1>
-            
+
             {move || error.get().map(|e| view! {
                 <div class="error">{e}</div>
             })}
@@ -223,7 +224,7 @@ pub fn LocationsPage() -> impl IntoView {
                                                                     <button disabled class="btn btn-small btn-secondary" title="Please log in to delete">"Delete"</button>
                                                                 }
                                                             >
-                                                                <button 
+                                                                <button
                                                                     on:click={
                                                                         let edit_loc = edit_loc_clone.clone();
                                                                         move |_| edit_location((*edit_loc).clone())
@@ -232,7 +233,7 @@ pub fn LocationsPage() -> impl IntoView {
                                                                 >
                                                                     "Edit"
                                                                 </button>
-                                                                <button 
+                                                                <button
                                                                     on:click=move |_| delete_location_action(delete_id)
                                                                     class="btn btn-small btn-danger"
                                                                 >
@@ -303,7 +304,7 @@ pub fn EmpiresPage() -> impl IntoView {
                         }
                         set_show_form.set(false);
                         set_editing_empire.set(None);
-                    },
+                    }
                     Err(e) => set_error.set(Some(e)),
                 }
                 set_loading.set(false);
@@ -335,11 +336,9 @@ pub fn EmpiresPage() -> impl IntoView {
         spawn_local(async move {
             set_loading.set(true);
             match api::delete_empire(id).await {
-                Ok(_) => {
-                    match api::get_empires().await {
-                        Ok(emps) => set_empires.set(emps),
-                        Err(e) => set_error.set(Some(e)),
-                    }
+                Ok(_) => match api::get_empires().await {
+                    Ok(emps) => set_empires.set(emps),
+                    Err(e) => set_error.set(Some(e)),
                 },
                 Err(e) => set_error.set(Some(e)),
             }
@@ -351,7 +350,7 @@ pub fn EmpiresPage() -> impl IntoView {
         <Navbar/>
         <div class="container">
             <h1>"Empires"</h1>
-            
+
             {move || error.get().map(|e| view! {
                 <div class="error">{e}</div>
             })}
@@ -417,7 +416,7 @@ pub fn EmpiresPage() -> impl IntoView {
                                                                     <button disabled class="btn btn-small btn-secondary" title="Please log in to delete">"Delete"</button>
                                                                 }
                                                             >
-                                                                <button 
+                                                                <button
                                                                     on:click={
                                                                         let edit_emp = edit_emp_clone.clone();
                                                                         move |_| edit_empire((*edit_emp).clone())
@@ -426,7 +425,7 @@ pub fn EmpiresPage() -> impl IntoView {
                                                                 >
                                                                     "Edit"
                                                                 </button>
-                                                                <button 
+                                                                <button
                                                                     on:click=move |_| delete_empire_action(delete_id)
                                                                     class="btn btn-small btn-danger"
                                                                 >
@@ -485,7 +484,9 @@ pub fn UsersPage() -> impl IntoView {
                 let result = if let Some(user) = editing_user.get() {
                     api::update_user(user.id, data).await
                 } else {
-                    api::register(data.fullname, data.email, data.password, data.role).await
+                    // Admin-driven user create can't promote on signup; the
+                    // new user starts as READER and an admin can edit later.
+                    api::register(data.fullname, data.email, data.password).await
                 };
 
                 match result {
@@ -497,7 +498,7 @@ pub fn UsersPage() -> impl IntoView {
                         }
                         set_show_form.set(false);
                         set_editing_user.set(None);
-                    },
+                    }
                     Err(e) => set_error.set(Some(e)),
                 }
                 set_loading.set(false);
@@ -529,11 +530,9 @@ pub fn UsersPage() -> impl IntoView {
         spawn_local(async move {
             set_loading.set(true);
             match api::delete_user(id).await {
-                Ok(_) => {
-                    match api::get_users().await {
-                        Ok(user_list) => set_users.set(user_list),
-                        Err(e) => set_error.set(Some(e)),
-                    }
+                Ok(_) => match api::get_users().await {
+                    Ok(user_list) => set_users.set(user_list),
+                    Err(e) => set_error.set(Some(e)),
                 },
                 Err(e) => set_error.set(Some(e)),
             }
@@ -545,7 +544,7 @@ pub fn UsersPage() -> impl IntoView {
         <Navbar/>
         <div class="container">
             <h1>"Users"</h1>
-            
+
             {move || error.get().map(|e| view! {
                 <div class="error">{e}</div>
             })}
@@ -609,7 +608,7 @@ pub fn UsersPage() -> impl IntoView {
                                                                     <button disabled class="btn btn-small btn-secondary" title="Please log in to delete">"Delete"</button>
                                                                 }
                                                             >
-                                                                <button 
+                                                                <button
                                                                     on:click={
                                                                         let edit_usr = edit_usr_clone.clone();
                                                                         move |_| edit_user((*edit_usr).clone())
@@ -618,7 +617,7 @@ pub fn UsersPage() -> impl IntoView {
                                                                 >
                                                                     "Edit"
                                                                 </button>
-                                                                <button 
+                                                                <button
                                                                     on:click=move |_| delete_user_action(delete_id)
                                                                     class="btn btn-small btn-danger"
                                                                 >

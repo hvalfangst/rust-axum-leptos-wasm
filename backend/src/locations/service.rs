@@ -1,233 +1,139 @@
-pub mod service {
-    use diesel::{
-        prelude::*,
-        PgConnection,
-        r2d2::{ConnectionManager, PooledConnection},
-    };
-    use crate::{
-        locations::model::{Location, UpsertLocation},
-        schema
-    };
+use diesel::prelude::*;
+use diesel::r2d2::{ConnectionManager, PooledConnection};
+use diesel::PgConnection;
 
-    type PooledPg = PooledConnection<ConnectionManager<PgConnection>>;
+use crate::common::error::CustomError;
+use crate::locations::model::{Location, UpsertLocation};
+use crate::schema;
 
-    pub struct LocationsTable {
-        connection: PooledPg,
+type PooledPg = PooledConnection<ConnectionManager<PgConnection>>;
+
+pub struct LocationsTable {
+    connection: PooledPg,
+}
+
+impl LocationsTable {
+    pub fn new(connection: PooledPg) -> Self {
+        Self { connection }
     }
 
-    impl LocationsTable {
-        pub fn new(connection: PooledPg) -> LocationsTable {
-            LocationsTable { connection }
-        }
+    pub fn create(&mut self, upsert: UpsertLocation) -> Result<Location, CustomError> {
+        use schema::locations;
 
-        pub fn create(&mut self, upsert_location: UpsertLocation) -> Result<Location, diesel::result::Error> {
-            use schema::locations;
+        diesel::insert_into(locations::table)
+            .values((
+                locations::star_system.eq(&upsert.star_system),
+                locations::area.eq(&upsert.area),
+            ))
+            .get_result(&mut self.connection)
+            .map_err(|err| CustomError::from_diesel_err(err, "while creating location"))
+    }
 
-            let new_location = diesel::insert_into(locations::table)
-                .values((
-                    locations::star_system.eq(&upsert_location.star_system),
-                    locations::area.eq(&upsert_location.area),
-                ))
-                .get_result(&mut self.connection)
-                .expect("Create location failed");
+    pub fn get_all(&mut self) -> Result<Vec<Location>, CustomError> {
+        use schema::locations;
+        locations::table
+            .load::<Location>(&mut self.connection)
+            .map_err(|err| CustomError::from_diesel_err(err, "while listing locations"))
+    }
 
-            Ok(new_location)
-        }
+    pub fn get(&mut self, location_id: i32) -> Result<Option<Location>, CustomError> {
+        use schema::locations;
+        locations::table
+            .find(location_id)
+            .get_result(&mut self.connection)
+            .optional()
+            .map_err(|err| CustomError::from_diesel_err(err, "while reading location"))
+    }
 
-        pub fn get_all(&mut self) -> Result<Vec<Location>, diesel::result::Error> {
-            use schema::locations;
+    pub fn update(&mut self, location_id: i32, upsert: UpsertLocation) -> Result<Location, CustomError> {
+        use schema::locations;
 
-            let all_locations = locations::table
-                .load::<Location>(&mut self.connection)?;
+        let updated = diesel::update(locations::table.find(location_id))
+            .set((
+                locations::star_system.eq(&upsert.star_system),
+                locations::area.eq(&upsert.area),
+            ))
+            .get_result::<Location>(&mut self.connection);
 
-            Ok(all_locations)
-        }
-
-        pub fn get(&mut self, location_id: i32) -> Result<Option<Location>, diesel::result::Error> {
-            use schema::locations;
-
-            let location = locations::table.find(location_id)
-                .get_result(&mut self.connection)
-                .optional()?;
-
-            Ok(location)
-        }
-
-        pub fn update(&mut self, location_id: i32, upsert_location: UpsertLocation) -> Result<Location, diesel::result::Error> {
-            use schema::locations;
-
-            // Check if the location exists before attempting to update
-            let existing_location = locations::table.find(location_id)
-                .get_result::<Location>(&mut self.connection);
-
-            match existing_location {
-                Ok(_) => {
-                    let updated_location = diesel::update(locations::table.find(location_id))
-                        .set((
-                            locations::star_system.eq(&upsert_location.star_system),
-                            locations::area.eq(&upsert_location.area),
-                        ))
-                        .get_result(&mut self.connection)
-                        .expect("Update location failed");
-
-                    Ok(updated_location)
-                },
-                Err(_) => Err(diesel::result::Error::NotFound)
-            }
-        }
-
-        pub fn delete(&mut self, location_id: i32) -> Result<(), diesel::result::Error> {
-            use schema::locations;
-
-            // Check if the location exists before attempting to delete
-            let existing_location = locations::table.find(location_id)
-                .get_result::<Location>(&mut self.connection);
-
-            match existing_location {
-                Ok(_) => {
-                    diesel::delete(locations::table.find(location_id))
-                        .execute(&mut self.connection)?;
-                    Ok(())
-                },
-                Err(_) => {
-                    Err(diesel::result::Error::NotFound)
-                }
-            }
+        match updated {
+            Ok(loc) => Ok(loc),
+            Err(diesel::result::Error::NotFound) => Err(CustomError::not_found("Location not found")),
+            Err(err) => Err(CustomError::from_diesel_err(err, "while updating location")),
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use crate::{
-            common::{
-                db::create_shared_connection_pool,
-                util::load_environment_variable
-            },
-            locations::{
-                model::UpsertLocation,
-                service::service::LocationsTable
-            }
-        };
-
-        #[test]
-        fn create_succeeds_on_valid_input() {
-            let database_url = load_environment_variable("TEST_DB");
-            let connection_pool = create_shared_connection_pool(database_url, 1);
-            let connection = connection_pool.pool.get().expect("Failed to get connection");
-            let mut location_db = LocationsTable::new(connection);
-
-            let new_location = UpsertLocation {
-                star_system: "Test Star System".to_string(),
-                area: "Test Area".to_string(),
-            };
-
-            let created_location = location_db.create(new_location.clone()).expect("Create location failed");
-
-            assert_eq!(created_location.star_system, new_location.star_system);
-            assert_eq!(created_location.area, new_location.area);
-        }
-
-
-        #[test]
-        fn read_succeeds_on_existing_id() {
-            let database_url = load_environment_variable("TEST_DB");
-            let connection_pool = create_shared_connection_pool(database_url, 1);
-            let connection = connection_pool.pool.get().expect("Failed to get connection");
-            let mut location_db = LocationsTable::new(connection);
-
-            let new_location = UpsertLocation {
-                star_system: "Test Star System".to_string(),
-                area: "Test Area".to_string(),
-            };
-            let created_location = location_db.create(new_location.clone()).expect("Create location failed");
-
-            let retrieved_location = location_db.get(created_location.id).expect("Read location failed").unwrap();
-
-            assert_eq!(retrieved_location.star_system, new_location.star_system);
-            assert_eq!(retrieved_location.area, new_location.area);
-        }
-
-        #[test]
-        fn read_returns_none_on_nonexistent_id() {
-            let database_url = load_environment_variable("TEST_DB");
-            let connection_pool = create_shared_connection_pool(database_url, 1);
-            let connection = connection_pool.pool.get().expect("Failed to get connection");
-            let mut location_db = LocationsTable::new(connection);
-
-            let retrieved_location = location_db.get(-666);  // Use a non-existent ID
-            assert!(retrieved_location.is_ok());  // Expecting Ok(None)
-            assert!(retrieved_location.unwrap().is_none());
-        }
-
-
-        #[test]
-        fn update_succeeds_on_valid_input() {
-            let database_url = load_environment_variable("TEST_DB");
-            let connection_pool = create_shared_connection_pool(database_url, 1);
-            let connection = connection_pool.pool.get().expect("Failed to get connection");
-            let mut location_db = LocationsTable::new(connection);
-
-            let new_location = UpsertLocation {
-                star_system: "Test Star System".to_string(),
-                area: "Test Area".to_string(),
-            };
-            let created_location = location_db.create(new_location.clone()).expect("Create location failed");
-
-            let updated_request = UpsertLocation {
-                star_system: "Updated Star System".to_string(),
-                area: "Updated Area".to_string(),
-            };
-            let updated_location = location_db.update(created_location.id, updated_request.clone()).expect("Update location failed");
-
-            assert_eq!(updated_location.star_system, updated_request.star_system);
-            assert_eq!(updated_location.area, updated_request.area);
-        }
-
-        #[test]
-        fn update_fails_on_nonexistent_id() {
-            let database_url = load_environment_variable("TEST_DB");
-            let connection_pool = create_shared_connection_pool(database_url, 1);
-            let connection = connection_pool.pool.get().expect("Failed to get connection");
-            let mut location_db = LocationsTable::new(connection);
-
-            let request = UpsertLocation {
-                star_system: "This test will fail".to_string(),
-                area: "so write random skit here".to_string(),
-            };
-
-            let result = location_db.update(-1, request.clone());  // Use a non-existent ID
-            assert!(result.is_err());  // Expecting an error as the ID is not present
-        }
-
-
-        #[test]
-        fn delete_succeeds_on_existing_id() {
-            let database_url = load_environment_variable("TEST_DB");
-            let connection_pool = create_shared_connection_pool(database_url, 1);
-            let connection = connection_pool.pool.get().expect("Failed to get connection");
-            let mut location_db = LocationsTable::new(connection);
-
-            let new_location = UpsertLocation {
-                star_system: "Test Star System".to_string(),
-                area: "Test Area".to_string(),
-            };
-
-            let created_location = location_db.create(new_location.clone()).expect("Create location failed");
-            location_db.delete(created_location.id.clone()).expect("Delete location failed");
-            let deleted_location = location_db.get(created_location.id).expect("Read location failed");
-            assert!(deleted_location.is_none()); // Expecting lack of value as location has been deleted
-        }
-
-        #[test]
-        fn delete_fails_on_nonexistent_id() {
-            let database_url = load_environment_variable("TEST_DB");
-            let connection_pool = create_shared_connection_pool(database_url, 1);
-            let connection = connection_pool.pool.get().expect("Failed to get connection");
-            let mut location_db = LocationsTable::new(connection);
-
-            let result = location_db.delete(-666);  // Use a non-existent ID
-            assert!(result.is_err());  // Expecting an error as the ID is not present
+    pub fn delete(&mut self, location_id: i32) -> Result<(), CustomError> {
+        use schema::locations;
+        let rows = diesel::delete(locations::table.find(location_id))
+            .execute(&mut self.connection)
+            .map_err(|err| CustomError::from_diesel_err(err, "while deleting location"))?;
+        if rows == 0 {
+            Err(CustomError::not_found("Location not found"))
+        } else {
+            Ok(())
         }
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use crate::common::db::create_shared_connection_pool;
+    use crate::common::error::ErrorType;
+    use crate::common::util::load_environment_variable;
+    use crate::locations::model::UpsertLocation;
+    use crate::locations::service::LocationsTable;
+
+    fn pool() -> crate::common::db::ConnectionPool {
+        let database_url = load_environment_variable("TEST_DB");
+        create_shared_connection_pool(database_url, 2)
+    }
+
+    #[test]
+    fn create_succeeds_on_valid_input() {
+        let p = pool();
+        let connection = p.pool.get().expect("Failed to get connection");
+        let mut db = LocationsTable::new(connection);
+
+        let new_loc = UpsertLocation {
+            star_system: "Test Star System".to_string(),
+            area: "Test Area".to_string(),
+        };
+        let created = db.create(new_loc.clone()).expect("Create location failed");
+        assert_eq!(created.star_system, new_loc.star_system);
+        assert_eq!(created.area, new_loc.area);
+    }
+
+    #[test]
+    fn read_returns_none_on_nonexistent_id() {
+        let p = pool();
+        let connection = p.pool.get().expect("Failed to get connection");
+        let mut db = LocationsTable::new(connection);
+
+        let result = db.get(-666).expect("get should not error on missing id");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn update_fails_on_nonexistent_id() {
+        let p = pool();
+        let connection = p.pool.get().expect("Failed to get connection");
+        let mut db = LocationsTable::new(connection);
+
+        let request = UpsertLocation {
+            star_system: "x".to_string(),
+            area: "y".to_string(),
+        };
+        let result = db.update(-1, request);
+        assert!(matches!(result, Err(e) if e.err_type == ErrorType::NotFound));
+    }
+
+    #[test]
+    fn delete_fails_on_nonexistent_id() {
+        let p = pool();
+        let connection = p.pool.get().expect("Failed to get connection");
+        let mut db = LocationsTable::new(connection);
+
+        let result = db.delete(-666);
+        assert!(matches!(result, Err(e) if e.err_type == ErrorType::NotFound));
+    }
+}

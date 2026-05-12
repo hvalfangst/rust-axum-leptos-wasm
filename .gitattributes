@@ -1,0 +1,17 @@
+# Normalize line endings to LF for source/config files.
+# Keeps diffs clean across Windows/Linux/macOS contributors.
+* text=auto eol=lf
+
+*.rs        text eol=lf
+*.toml      text eol=lf
+*.lock      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.sql       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.sh        text eol=lf
+.env*       text eol=lf
+Dockerfile  text eol=lf

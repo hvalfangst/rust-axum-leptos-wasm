@@ -4,45 +4,164 @@ on:
   workflow_dispatch:
   push:
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  # cargo-llvm-cov needs nightly for some features but works on stable
+  CARGO_INCREMENTAL: 0
+
 jobs:
-  build:
+  # ------------------------------------------------------------------
+  # Fast, no-DB checks: formatting + clippy + dependency audit
+  # ------------------------------------------------------------------
+  lint:
+    name: Format, Clippy & Audit
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backend
+            frontend
+
+      # ---- Formatting ------------------------------------------------
+      - name: cargo fmt (backend)
+        working-directory: backend
+        run: cargo fmt --all -- --check
+
+      - name: cargo fmt (frontend)
+        working-directory: frontend
+        run: cargo fmt --all -- --check
+
+      # ---- Linting ---------------------------------------------------
+      - name: cargo clippy (backend)
+        working-directory: backend
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo clippy (frontend)
+        working-directory: frontend
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # ---- Security audit -------------------------------------------
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: cargo audit (backend)
+        working-directory: backend
+        run: cargo audit --deny warnings
+
+      - name: cargo audit (frontend)
+        working-directory: frontend
+        run: cargo audit --deny warnings
+
+  # ------------------------------------------------------------------
+  # Build, test, and measure coverage against a real Postgres instance
+  # ------------------------------------------------------------------
+  test-and-coverage:
+    name: Build, Test & Coverage
+    runs-on: ubuntu-latest
+    needs: lint
 
     services:
       postgres:
-        image: postgres:latest
+        image: postgres:16
         env:
           POSTGRES_USER: Glossy
           POSTGRES_PASSWORD: yellau
           POSTGRES_DB: test_db
         ports:
           - 4444:5432
-        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DB: postgres://Glossy:yellau@localhost:4444/test_db
+      DEV_DB:  postgres://Glossy:yellau@localhost:4444/test_db
+      ENCRYPTION_KEY: ci-only-encryption-key-do-not-use-in-prod
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v3
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
         with:
-          path: |
-            ~/.cargo
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          components: llvm-tools-preview
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backend
+            frontend
 
       - name: Install Diesel CLI
         run: |
           if ! command -v diesel &> /dev/null; then
-            cargo install diesel_cli --no-default-features --features "postgres"
+            cargo install diesel_cli --no-default-features --features "postgres" --locked
           fi
 
-      - name: Run Database Migrations
+      - name: Run database migrations
+        working-directory: backend
+        run: diesel migration run --database-url="${TEST_DB}"
+
+      # ---- Coverage tooling -----------------------------------------
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # ---- Backend: build + test with coverage ----------------------
+      - name: Backend test + coverage
+        working-directory: backend
         run: |
-          diesel migration run --database-url="postgres://Glossy:yellau@localhost:4444/test_db"
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --all-features --workspace \
+            --lcov --output-path lcov.info
+          # Human-readable summary printed to the build log
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          # Fail the job if coverage drops below a floor (tune as needed)
+          cargo llvm-cov report --fail-under-lines 60
 
-      - name: Build Rust application
-        run: cargo build
+      - name: Generate HTML coverage report
+        working-directory: backend
+        run: cargo llvm-cov report --html --output-dir coverage-html
 
-      - name: Run Rust tests
-        run: cargo test
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: |
+            backend/lcov.info
+            backend/coverage-summary.txt
+            backend/coverage-html
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload coverage to Codecov (optional)
+        if: ${{ env.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@v4
+        with:
+          files: backend/lcov.info
+          flags: backend
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      # ---- Frontend: ensure the wasm crate at least builds ----------
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Frontend build (wasm)
+        working-directory: frontend
+        run: cargo build --target wasm32-unknown-unknown --release

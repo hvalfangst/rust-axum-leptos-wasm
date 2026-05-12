@@ -63,10 +63,4 @@ diesel::joinable!(players -> ships (active_ship_id));
 diesel::joinable!(players -> users (user_id));
 diesel::joinable!(ships -> empires (empire_id));
 
-diesel::allow_tables_to_appear_in_same_query!(
-    empires,
-    locations,
-    players,
-    ships,
-    users,
-);
+diesel::allow_tables_to_appear_in_same_query!(empires, locations, players, ships, users,);

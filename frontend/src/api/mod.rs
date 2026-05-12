@@ -1,29 +1,35 @@
 use gloo_net::http::Request;
-use leptos::*;
 use serde::{Deserialize, Serialize};
 
-// Base API URL - adjust this to match your backend
-const API_BASE: &str = "http://localhost:3000";
+/// Base API URL. Overridable at build time via `API_BASE_URL` env var.
+const API_BASE: &str = match option_env!("API_BASE_URL") {
+    Some(v) => v,
+    None => "http://localhost:3000",
+};
 
-// Auth token management
+const TOKEN_KEY: &str = "auth_token";
+
+// Auth token management — uses sessionStorage instead of localStorage so the
+// token is cleared on tab close. Still XSS-readable; the only real fix is
+// HttpOnly cookies, but that requires backend cookie handling and CORS rework.
 pub fn get_token() -> Option<String> {
     let window = web_sys::window()?;
-    let storage = window.local_storage().ok()??;
-    storage.get_item("auth_token").ok()?
+    let storage = window.session_storage().ok()??;
+    storage.get_item(TOKEN_KEY).ok()?
 }
 
 pub fn set_token(token: &str) {
     if let Some(window) = web_sys::window() {
-        if let Ok(Some(storage)) = window.local_storage() {
-            let _ = storage.set_item("auth_token", token);
+        if let Ok(Some(storage)) = window.session_storage() {
+            let _ = storage.set_item(TOKEN_KEY, token);
         }
     }
 }
 
 pub fn clear_token() {
     if let Some(window) = web_sys::window() {
-        if let Ok(Some(storage)) = window.local_storage() {
-            let _ = storage.remove_item("auth_token");
+        if let Ok(Some(storage)) = window.session_storage() {
+            let _ = storage.remove_item(TOKEN_KEY);
         }
     }
 }
@@ -47,12 +53,13 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+/// Registration payload. Role is server-assigned (defaults to READER) — no
+/// `role` field here, so the client can't request elevated privileges.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RegisterRequest {
     pub fullname: String,
     pub email: String,
     pub password: String,
-    pub role: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -93,12 +100,10 @@ pub struct UpsertEmpire {
     pub description: String,
 }
 
-// Backend returns just the token string, not an object
-
 // API Functions
 pub async fn login(email: String, password: String) -> Result<String, String> {
     let request = LoginRequest { email, password };
-    
+
     let response = Request::post(&format!("{}/users/login", API_BASE))
         .header("Content-Type", "application/json")
         .json(&request)
@@ -112,21 +117,22 @@ pub async fn login(email: String, password: String) -> Result<String, String> {
             .json()
             .await
             .map_err(|e| format!("Failed to parse response: {:?}", e))?;
-        
+
         set_token(&token);
         Ok(token)
     } else {
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
         Err(format!("Login failed: {}", error_text))
     }
 }
 
-pub async fn register(fullname: String, email: String, password: String, role: String) -> Result<User, String> {
-    let request = RegisterRequest { fullname, email, password, role };
-    
+pub async fn register(fullname: String, email: String, password: String) -> Result<User, String> {
+    let request = RegisterRequest {
+        fullname,
+        email,
+        password,
+    };
+
     let response = Request::post(&format!("{}/users", API_BASE))
         .header("Content-Type", "application/json")
         .json(&request)
@@ -142,10 +148,7 @@ pub async fn register(fullname: String, email: String, password: String, role: S
             .map_err(|e| format!("Failed to parse response: {:?}", e))?;
         Ok(user)
     } else {
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
         Err(format!("Registration failed: {}", error_text))
     }
 }
@@ -153,7 +156,7 @@ pub async fn register(fullname: String, email: String, password: String, role: S
 // Helper function to create authenticated requests
 fn authenticated_request(method: &str, url: &str) -> Result<gloo_net::http::RequestBuilder, String> {
     let token = get_token().ok_or("No authentication token found")?;
-    
+
     let request = match method {
         "GET" => Request::get(url),
         "POST" => Request::post(url),
@@ -161,23 +164,19 @@ fn authenticated_request(method: &str, url: &str) -> Result<gloo_net::http::Requ
         "DELETE" => Request::delete(url),
         _ => return Err("Unsupported HTTP method".to_string()),
     };
-    
+
     let request = request
         .header("Authorization", &format!("Bearer {}", token))
         .header("Content-Type", "application/json");
-    
+
     Ok(request)
 }
 
-// Helper function to handle API response errors
 async fn handle_api_error(response: gloo_net::http::Response) -> String {
     if response.status() == 401 {
         "Not authenticated - Please log in".to_string()
     } else {
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
         format!("Request failed: {}", error_text)
     }
 }
@@ -353,6 +352,7 @@ pub async fn get_users() -> Result<Vec<User>, String> {
     }
 }
 
+#[allow(dead_code)]
 pub async fn get_user(id: i32) -> Result<User, String> {
     let response = authenticated_request("GET", &format!("{}/users/{}", API_BASE, id))?
         .send()

@@ -1,31 +1,46 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
-use axum::{http, Json};
-use bcrypt::hash;
-use http::{HeaderMap, StatusCode};
-use jsonwebtoken::{Algorithm, decode, DecodingKey, TokenData, Validation, errors::ErrorKind as JwtErrorKind, encode, Header, EncodingKey};
-use serde_json::{json, Value};
-use crate::{
-    common::{db::ConnectionPool, util::load_environment_variable},
-    users::{
-        model::{Claims, User, UpsertUser, UserRole, string_to_user_role},
-        service::service::UsersTable as UsersDB,
-    },
-};
 
-pub fn hash_password(body: &mut UpsertUser) -> Result<(), (StatusCode, Json<Value>)> {
-    if let Ok(hashed_password) = hash(&body.password, 12) {
-        body.password = hashed_password;
-        Ok(())
-    } else {
-        Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to hash password"}))))
-    }
+use bcrypt::hash;
+use http::HeaderMap;
+use jsonwebtoken::{
+    decode, encode, errors::ErrorKind as JwtErrorKind, Algorithm, DecodingKey, EncodingKey, Header, TokenData,
+    Validation,
+};
+use once_cell::sync::Lazy;
+use tracing::debug;
+
+use crate::common::{config::Config, db::ConnectionPool, error::CustomError};
+use crate::users::model::{Claims, UpsertUser, User, UserRole};
+use crate::users::service::UsersTable as UsersDB;
+
+const BCRYPT_COST: u32 = 12;
+const TOKEN_TTL_SECS: u64 = 3600;
+
+/// Role inclusion map. Built once.
+static ROLE_HIERARCHY: Lazy<HashMap<UserRole, &'static [UserRole]>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+    m.insert(
+        UserRole::ADMIN,
+        &[UserRole::ADMIN, UserRole::EDITOR, UserRole::WRITER, UserRole::READER][..],
+    );
+    m.insert(
+        UserRole::EDITOR,
+        &[UserRole::EDITOR, UserRole::WRITER, UserRole::READER][..],
+    );
+    m.insert(UserRole::WRITER, &[UserRole::WRITER, UserRole::READER][..]);
+    m.insert(UserRole::READER, &[UserRole::READER][..]);
+    m
+});
+
+pub fn hash_password(body: &mut UpsertUser) -> Result<(), CustomError> {
+    body.password = hash(&body.password, BCRYPT_COST).map_err(|_| CustomError::internal("Failed to hash password"))?;
+    Ok(())
 }
 
 pub fn generate_token(user: &User) -> Result<String, jsonwebtoken::errors::Error> {
-    let role = string_to_user_role(user.clone().role);
     let expiration = SystemTime::now()
-        .checked_add(Duration::from_secs(3600)) // Set the token to expire in 1 hour
+        .checked_add(Duration::from_secs(TOKEN_TTL_SECS))
         .expect("Failed to calculate token expiration")
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("SystemTime before UNIX EPOCH")
@@ -33,65 +48,44 @@ pub fn generate_token(user: &User) -> Result<String, jsonwebtoken::errors::Error
 
     let claims = Claims {
         sub: user.email.clone(),
-        role: role.clone(),
+        role: UserRole::from_str(&user.role),
         exp: expiration,
     };
 
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(load_environment_variable("ENCRYPTION_KEY").as_ref()))
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(Config::get().encryption_key.as_ref()),
+    )
 }
 
-pub fn decode_claims(headers: &HeaderMap) -> Result<Option<TokenData<Claims>>, (StatusCode, Json<Value>)> {
+pub fn decode_claims(headers: &HeaderMap) -> Result<TokenData<Claims>, CustomError> {
+    // Retrieve Authorization header
+    let token_header = headers
+        .get("Authorization")
+        .ok_or_else(|| CustomError::unauthorized("Missing Authorization header"))?;
 
-    // Retrieve Authorization header from the map of request headers
-    let token_header = headers.get("Authorization");
+    let token = token_header
+        .to_str()
+        .map_err(|_| CustomError::unauthorized("Authorization header is not valid UTF-8"))?;
 
-    // Map token if it exists - return error if not
-    let token = match token_header {
-        None => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Missing header"})),
-            ));
-        }
-        Some(header) => header.to_str().unwrap(),
-    };
+    let raw = token
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| CustomError::unauthorized("Token is missing 'Bearer ' prefix"))?;
 
-    // Return error if the the token does not start with "Bearer"
-    if !token.starts_with("Bearer ") {
-        eprintln!("Token is missing 'Bearer ' prefix");
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Token is missing 'Bearer ' prefix"})),
-        ));
-    }
-
-    // Attempt to decode token and match the results
     match decode::<Claims>(
-        &token[7..],
-        &DecodingKey::from_secret(load_environment_variable("ENCRYPTION_KEY").as_ref()),
+        raw,
+        &DecodingKey::from_secret(Config::get().encryption_key.as_ref()),
         &Validation::new(Algorithm::HS256),
     ) {
-        Err(err) => {
-            match err.kind() {
-                // Handle the specific ExpiredSignature error
-                JwtErrorKind::ExpiredSignature => {
-                    eprintln!("JWT expired: {:?}", err);
-                    Err((
-                        StatusCode::UNAUTHORIZED,
-                        Json(json!({"error": "Token has expired"})),
-                    ))
-                }
-                _ => {
-                    // Handle other decoding errors
-                    eprintln!("Error decoding JWT: {:?}", err);
-                    Err((
-                        StatusCode::UNAUTHORIZED,
-                        Json(json!({"error": "Invalid JWT"})),
-                    ))
-                }
+        Ok(decoded) => Ok(decoded),
+        Err(err) => match err.kind() {
+            JwtErrorKind::ExpiredSignature => Err(CustomError::unauthorized("Token has expired")),
+            _ => {
+                debug!(?err, "JWT decode failed");
+                Err(CustomError::unauthorized("Invalid JWT"))
             }
-        }
-        Ok(decoded_claims) => Ok(Some(decoded_claims)),
+        },
     }
 }
 
@@ -99,51 +93,38 @@ pub async fn authorize_with_role(
     headers: &HeaderMap,
     shared_state: &ConnectionPool,
     required_role: UserRole,
-) -> Result<Option<User>, (StatusCode, Json<Value>)> {
-    // Decode claims from bearer token header
-    let claims = match decode_claims(headers) {
-        Ok(claims) => claims,
-        Err((status_code, json_value)) => return Err((status_code, json_value)),
-    };
-
-    // Ensure that the user derived from claims exists and has the required role or higher
+) -> Result<User, CustomError> {
+    let claims = decode_claims(headers)?;
     enforce_role_policy(shared_state, &claims, required_role).await
 }
 
 pub async fn enforce_role_policy(
     shared_state: &ConnectionPool,
-    claims: &Option<TokenData<Claims>>,
+    claims: &TokenData<Claims>,
     required_role: UserRole,
-) -> Result<Option<User>, (StatusCode, Json<Value>)> {
-    let connection = shared_state.pool.get().expect("Failed to acquire connection from pool");
+) -> Result<User, CustomError> {
+    let connection = shared_state
+        .pool
+        .get()
+        .map_err(|e| CustomError::internal(format!("DB pool: {e}")))?;
     let mut users = UsersDB::new(connection);
 
-    match users.get_by_email(claims.clone().unwrap().claims.sub) {
-        Ok(user) => {
-            let user_role = string_to_user_role(user.clone().unwrap().role);
+    let user = users
+        .get_by_email(&claims.claims.sub)?
+        .ok_or_else(|| CustomError::unauthorized("User in claims not found"))?;
 
-            // Accessing this map under UserRole key will return a list of associated subset roles
-            let role_hierarchy: HashMap<UserRole, Vec<UserRole>> = {
-                let mut hierarchy = HashMap::new();
-                hierarchy.insert(UserRole::ADMIN, vec![UserRole::ADMIN, UserRole::EDITOR, UserRole::WRITER, UserRole::READER]);
-                hierarchy.insert(UserRole::EDITOR, vec![UserRole::EDITOR, UserRole::WRITER, UserRole::READER]);
-                hierarchy.insert(UserRole::WRITER, vec![UserRole::WRITER, UserRole::READER]);
-                hierarchy.insert(UserRole::READER, vec![UserRole::READER]);
-                hierarchy
-            };
+    let user_role = UserRole::from_str(&user.role);
+    let allowed = ROLE_HIERARCHY
+        .get(&user_role)
+        .map(|roles| roles.contains(&required_role))
+        .unwrap_or(false);
 
-            // Check if the list of UserRoles associated with HashMap retrieval under key '&user_role' contains the required role '&required_role'
-            if role_hierarchy.get(&user_role).map(|roles| roles.contains(&required_role)).unwrap_or(false) {
-                eprintln!("Access granted: User role '{}' is a superset of or equal to required role '{}'", user_role, required_role);
-                Ok(user)
-            } else {
-                eprintln!("User role: {} does not match required role: {}", user_role, required_role);
-                Err((StatusCode::UNAUTHORIZED, Json(json!({"error": format!("Current role of {} does not have access to {}", user_role, required_role)}))))
-            }
-        }
-        Err(err) => {
-            eprintln!("User in claims not found in DB {:?}", err);
-            Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "User in claims not found in DB"}))))
-        }
+    if allowed {
+        debug!(role = %user_role, required = %required_role, "access granted");
+        Ok(user)
+    } else {
+        Err(CustomError::unauthorized(format!(
+            "Current role of {user_role} does not have access to {required_role}"
+        )))
     }
 }

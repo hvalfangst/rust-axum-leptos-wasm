@@ -1,2 +1,2 @@
-pub mod navbar;
 pub mod forms;
+pub mod navbar;
